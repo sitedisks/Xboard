@@ -81,18 +81,36 @@ class ClashMeta
             return $group['proxies'];
         });
         $config['proxy-groups'] = array_values($config['proxy-groups']);
-        // Force the current subscription domain to be a direct rule
-        $subsDomain = request()->header('Host');
-        if ($subsDomain) {
-            array_unshift($config['rules'], "DOMAIN,{$subsDomain},DIRECT");
-        }
+        $config = $this->buildRules($config);
 
         $yaml = Yaml::dump($config, 2, 4, Yaml::DUMP_EMPTY_ARRAY_AS_SEQUENCE);
         $yaml = str_replace('$app_name', admin_setting('app_name', 'XBoard'), $yaml);
         return response($yaml, 200)
             ->header('subscription-userinfo', "upload={$user['u']}; download={$user['d']}; total={$user['transfer_enable']}; expire={$user['expired_at']}")
             ->header('profile-update-interval', '24')
-            ->header('content-disposition', 'attachment;filename*=UTF-8\'\'' . rawurlencode($appName));
+            ->header('content-disposition', 'attachment;filename*=UTF-8\'\'' . rawurlencode($appName))
+            ->header('profile-web-page-url', admin_setting('app_url'));
+    }
+
+    /**
+     * Build the rules for Clash.
+     */
+    public function buildRules($config)
+    {
+        // Force the current subscription domain to be a direct rule
+        $subsDomain = request()->header('Host');
+        if ($subsDomain) {
+            array_unshift($config['rules'], "DOMAIN,{$subsDomain},DIRECT");
+        }
+        // Force the nodes ip to be a direct rule
+        collect($this->servers)->pluck('host')->map(function($host){
+            $host = trim($host);
+            return filter_var($host, FILTER_VALIDATE_IP) ? [$host] : Helper::getIpByDomainName($host);
+        })->flatten()->unique()->each(function($nodeIP) use ( &$config ) {
+            array_unshift($config['rules'], "IP-CIDR,{$nodeIP}/32,DIRECT,no-resolve");
+        });
+
+        return $config;
     }
 
     public static function buildShadowsocks($password, $server)
@@ -177,8 +195,6 @@ class ClashMeta
         $array['server'] = $server['host'];
         $array['port'] = $server['port'];
         $array['uuid'] = $password;
-        $array['alterId'] = 0;
-        $array['cipher'] = 'auto';
         $array['udp'] = true;
 
         // XTLS流控算法
@@ -190,8 +206,8 @@ class ClashMeta
                     $array['tls'] = true;
                     if ($server['tls_settings']) {
                         $tlsSettings = $server['tls_settings'];
-                        if (isset($tlsSettings['allowInsecure']) && !empty($tlsSettings['allowInsecure']))
-                            $array['skip-cert-verify'] = ($tlsSettings['allowInsecure'] ? true : false);
+                        if (isset($tlsSettings['allow_insecure']) && !empty($tlsSettings['allow_insecure']))
+                            $array['skip-cert-verify'] = ($tlsSettings['allow_insecure'] ? true : false);
                         if (isset($tlsSettings['server_name']) && !empty($tlsSettings['server_name']))
                             $array['servername'] = $tlsSettings['server_name'];
                     }
@@ -225,10 +241,8 @@ class ClashMeta
                     $array['ws-opts']['path'] = $wsSettings['path'];
                 if (isset($wsSettings['headers']['Host']) && !empty($wsSettings['headers']['Host']))
                     $array['ws-opts']['headers'] = ['Host' => $wsSettings['headers']['Host']];
-                if (isset($wsSettings['path']) && !empty($wsSettings['path']))
-                    $array['ws-path'] = $wsSettings['path'];
-                if (isset($wsSettings['headers']['Host']) && !empty($wsSettings['headers']['Host']))
-                    $array['ws-headers'] = ['Host' => $wsSettings['headers']['Host']];
+				$array['ws-opts']['max-early-data'] = 2560;
+                $array['ws-opts']['early-data-header-name'] = 'Sec-WebSocket-Protocol';
             }
         }
         if ($server['network'] === 'grpc') {
